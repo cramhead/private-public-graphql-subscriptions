@@ -12,14 +12,26 @@ import { useServer } from 'graphql-ws/lib/use/ws'
 import { createYoga } from 'graphql-yoga'
 import { WebSocketServer } from 'ws'
 import { makeGatewaySchema } from './gateway'
+import { GraphQLSchema } from 'graphql'
 
 async function start() {
-  const schema = await makeGatewaySchema({ waitForPorts: true });
+  const schemas = await makeGatewaySchema({ waitForPorts: true });
   const yogaApp = createYoga({
-    schema,
+    schema: schemas.privateSchema,
+    // schema: async({ request }): Promise<GraphQLSchema> => (request.headers.get('x-internal') == '1' ? schemas.privateSchema : schemas.publicSchema),
+    context: async (initialContext) => {
+      // adds the authorization to the context
+      let authorization;
+      const { request } = initialContext;
+      // if this is not a socket upgrade
+      if (request?.headers?.get) {
+        authorization = request.headers.get('authorization')
+        return ({ authorization, request })
+      }
+    },
     graphiql: {
       // Use WebSockets in GraphiQL
-      subscriptionsProtocol: 'WS'
+      subscriptionsProtocol:'WS'
     }
   })
 

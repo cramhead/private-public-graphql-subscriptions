@@ -1,175 +1,119 @@
-import { createYoga, YogaServerInstance } from 'graphql-yoga';
+import { YogaServerInstance } from 'graphql-yoga';
 import waitOn from 'wait-on';
 import { buildHTTPExecutor } from '@graphql-tools/executor-http';
 import { stitchSchemas } from '@graphql-tools/stitch';
 import { schemaFromExecutor } from '@graphql-tools/wrap';
-import { getOperationAST } from 'graphql'
+import { GraphQLSchema } from 'graphql'
 import { buildGraphQLWSExecutor } from '@graphql-tools/executor-graphql-ws'
+import { FilterPrivateByDefault } from './privateByDefault';
 
 type YogaFetch = YogaServerInstance<any, any>['fetch'];
 
+const tranformer = new FilterPrivateByDefault();
+
+type Service = {
+  name: string,
+  endpoint: string,
+  subscriptionUrl: string,
+  authorization?: string
+}
+
+// hard code services for now
+const services: Service[] = [
+//   {
+//   name: 'posts',
+//   endpoint: 'http://localhost:4001/graphql',
+//   subscriptionUrl: 'ws://localhost:4001/graphql'
+// },
+{
+  name: 'users',
+  endpoint: 'http://localhost:4002/graphql',
+  subscriptionUrl: 'http://localhost:4002/graphql',
+},
+ {
+  name: 'isam',
+  endpoint: 'http://localhost:4003/graphql',
+  subscriptionUrl: 'ws://localhost:4003/graphql',
+}]
+
 export async function makeGatewaySchema({
-  waitForPorts,
-  postsFetch,
-  usersFetch,
-  personsFetch
+  waitForPorts
 }: {
   waitForPorts?: boolean;
-  postsFetch?: YogaFetch;
-  usersFetch?: YogaFetch;
-  personsFetch?: YogaFetch;
 } = {}) {
   if (waitForPorts) {
     await waitOn({ resources: ['tcp:4001', 'tcp:4002'] });
   }
 
-  // build executor functions
-  // for communicating with remote services
-  const postsExec = buildHTTPExecutor({
-    endpoint: 'http://localhost:4001/graphql',
-    fetch: postsFetch,
-  });
-  const usersExec = buildHTTPExecutor({
-    endpoint: 'http://localhost:4002/graphql',
-    fetch: usersFetch,
-  });
-
-  function buildCombinedExecutor() {
-    const httpExecutor = buildHTTPExecutor({
-      endpoint: 'http://localhost:4003/graphql'
-    })
-    const wsExecutor = buildGraphQLWSExecutor({
-      url: 'ws://localhost:4003/graphql'
-    })
-    return executorRequest => {
-      if (executorRequest.operationType === 'subscription') {
-        return wsExecutor(executorRequest)
-      }
-      return httpExecutor(executorRequest)
+  async function createSchemas(services: Service[]): Promise<Array<{ publicSchema, privateSchema, executor }>> {
+    const subschemas = []
+    for await (const service of services) {
+      const { schema: privateSchema, executor } = await createPrivateSchema(service);
+      const publicSchema = await createPublicSchema(privateSchema);
+      subschemas.push({ privateSchema, publicSchema, executor })
     }
+    return subschemas;
   }
 
-  function buildIsamExecutor() {
+  async function createPrivateSchema(service: Service) {
+    const executor = buildExecutor(service)
+    return { schema: await schemaFromExecutor(executor), executor }
+  }
+
+  function createPublicSchema(privateSchema: GraphQLSchema) {
+    const publicSchema = tranformer.transformSchema(privateSchema)
+    return publicSchema;
+  }
+
+  function buildExecutor(servConfig: Service) {
     const httpExecutor = buildHTTPExecutor({
-      endpoint: 'https://isam.my.bluescape.io/graphql', 
+      endpoint: servConfig.endpoint,
       method: 'POST',
-      headers(executorRequest) {
-        console.log(`executorRequest`, executorRequest)
-        return ({
-          "authorization": "bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImswIn0.eyJleHAiOjE2OTYzNTczOTAsInNwaWQiOm51bGwsIm1mYSI6bnVsbCwibmJmIjoxNjk1MTQ3NzgwLCJpYXQiOjE2OTUxNDc3OTAsImp0aSI6IlhYVXRtcDlYNXpjSGdVYklMQi1Yam9BMGJ3RXU2Z3ZnMUVWakpBZlQyd2YxRkhXRSIsInN1YiI6InZqWk9obWdSajhjVGFnb3hvd2xiIiwidXNlclR5cGUiOiJyZWdpc3RlcmVkIiwiYXVkIjpbImlzYW1kbmpKc2tqR0c0RHplZDJadklkVFhTQThuRFU2NFBLc2EiLCIzNmY4Y2Y1MTc1ZTRmYWFhNGYwNjcxODQwNGI3ZGY5NGRkYzBkOGFlIiwiMDE1ZjQ4MWFjZmU0MDJjOWJhZTQzNTM4OWVmYmI2OTE0OTI5Y2U5ZCIsIjAxNWY0ODFhY2ZlNDAyYzliYWU0MzUzODllZmJiNjkxNDkyOWJmOGMiLCJWSkJ0aWFKZG5qSi1rakdHNER6ZWQyWnZJZFRYU0E4bkRVNjRQSzBjIiwid3NzaXplcmtuakpza2pHRzREemVkMlpTQThuRFU2NFBLZmkiXSwiaXNzIjoiaHR0cHM6Ly9pZGVudGl0eS1hcGkubXkuYmx1ZXNjYXBlLmlvIn0.BDLeuiGQWvFyOJDfKjJgYFDyewcbZjfI7UrEhotTJ6o"
-        });
+      timeout: 5000,
+      credentials: 'same-origin',
+      useGETForQueries: false,
+      headers(executionRequest) {
+        // get the authorization header that was passed into the gateway 
+        // and provide it to the remote service
+        const { context } = executionRequest;
+        const authorization = context?.authorization;
+        return { authorization }
       },
-    })
+    });
+
     const wsExecutor = buildGraphQLWSExecutor({
-      url: 'wss://isam.my.bluescape.io/graphql',
-      connectionParams: {
-        "authorization": "bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImswIn0.eyJleHAiOjE2OTYzNTczOTAsInNwaWQiOm51bGwsIm1mYSI6bnVsbCwibmJmIjoxNjk1MTQ3NzgwLCJpYXQiOjE2OTUxNDc3OTAsImp0aSI6IlhYVXRtcDlYNXpjSGdVYklMQi1Yam9BMGJ3RXU2Z3ZnMUVWakpBZlQyd2YxRkhXRSIsInN1YiI6InZqWk9obWdSajhjVGFnb3hvd2xiIiwidXNlclR5cGUiOiJyZWdpc3RlcmVkIiwiYXVkIjpbImlzYW1kbmpKc2tqR0c0RHplZDJadklkVFhTQThuRFU2NFBLc2EiLCIzNmY4Y2Y1MTc1ZTRmYWFhNGYwNjcxODQwNGI3ZGY5NGRkYzBkOGFlIiwiMDE1ZjQ4MWFjZmU0MDJjOWJhZTQzNTM4OWVmYmI2OTE0OTI5Y2U5ZCIsIjAxNWY0ODFhY2ZlNDAyYzliYWU0MzUzODllZmJiNjkxNDkyOWJmOGMiLCJWSkJ0aWFKZG5qSi1rakdHNER6ZWQyWnZJZFRYU0E4bkRVNjRQSzBjIiwid3NzaXplcmtuakpza2pHRzREemVkMlpTQThuRFU2NFBLZmkiXSwiaXNzIjoiaHR0cHM6Ly9pZGVudGl0eS1hcGkubXkuYmx1ZXNjYXBlLmlvIn0.BDLeuiGQWvFyOJDfKjJgYFDyewcbZjfI7UrEhotTJ6o"
+      url: servConfig.subscriptionUrl,
+      keepAlive: 5000,
+      retryAttempts: 60,
+    });
+
+    return executionRequest => {
+      if (executionRequest.operationType === 'subscription') {
+        // extracts the extensions and connectionParams. Appends the connectionParam object to the extensions to be included in the payload
+        const { extensions = {}, context: { connectionParams } } = executionRequest;
+        executionRequest.extensions = {
+          ...extensions, connectionParams
+          // connectionParams: {
+          //   authorization: "bearer <token>""
+          // }
+        }
+        return wsExecutor(executionRequest)
       }
-    })
-    return executorRequest => {
-      if (executorRequest.operationType === 'subscription') {
-        return wsExecutor(executorRequest)
-      }
-      return httpExecutor(executorRequest)
+      return httpExecutor(executionRequest)
     }
   }
 
-  const personsExec = buildCombinedExecutor()
-  //  buildHTTPExecutor({
-  //   endpoint: 'http://localhost:4003/graphql',
-  //   fetch: personsFetch,
-  //   method: 'GET',
-  //   useGETForQueries: false,
-  //   // headers: {"Content-Type": "application/json"}
-  // });
+  const serviceSubschemas = await createSchemas(services);
+  const subschemas = serviceSubschemas.map(subschema => ({ schema: subschema.privateSchema, executor: subschema.executor }))
 
-  return stitchSchemas({
-    subschemas: [
-      // {
-      //   schema: await schemaFromExecutor(postsExec),
-      //   executor: postsExec,
-      // },
-      // {
-      //   schema: await schemaFromExecutor(usersExec),
-      //   executor: usersExec,
-      //   merge: {
-      //     // Combine the User type across services...
-      //     // discussed in chapters three and four.
-      //     User: {
-      //       selectionSet: '{ id }',
-      //       fieldName: 'user',
-      //       args: ({ id }) => ({ id }),
-      //     },
-      //   },
-      // },
-      {
-        schema: await schemaFromExecutor(personsExec),
-        executor: personsExec,
-      }, 
-      {
-        schema: await schemaFromExecutor(buildIsamExecutor()),
-        executor: buildIsamExecutor()
-      }
-    ],
+  const privateStiched = stitchSchemas({
+    subschemas
   });
-}
 
-export function makeGatewayApp({
-  waitForPorts,
-  postsFetch,
-  usersFetch,
-  personsFetch,
-}: {
-  waitForPorts?: boolean;
-  postsFetch?: YogaFetch;
-  usersFetch?: YogaFetch;
-  personsFetch?: YogaFetch;
-} = {}) {
-  return createYoga({
-    schema: makeGatewaySchema({
-      waitForPorts,
-      postsFetch,
-      usersFetch,
-      personsFetch,
-    }),
-    maskedErrors: false,
-    graphiql: {
-      title: 'Mutations & subscriptions',
-      defaultQuery: /* GraphQL */ `
-        query Posts {
-          posts {
-            id
-            message
-            user {
-              username
-              email
-            }
-          }
-        }
+  const publicSubschemas = serviceSubschemas.map(subschema => ({ schema: subschema.publicSchema, executor: subschema.executor }))
+  const publicStiched = stitchSchemas({
+    subschemas
+  })
 
-        mutation CreatePost {
-          createPost(message: "hello world") {
-            id
-            message
-            user {
-              username
-              email
-            }
-          }
-        }
-
-        subscription OnNewPost {
-          newPost {
-            id
-            message
-            user {
-              id
-              username
-              email
-            }
-          }
-        }
-      `,
-    },
-  });
+  return { privateSchema: privateStiched, publicSchema: publicStiched }
 }
