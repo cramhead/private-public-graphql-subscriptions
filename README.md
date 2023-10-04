@@ -10,7 +10,7 @@ After cloning https://github.com/cramhead/nest-gql-pub-sub running `docker compo
 
 After that `npm install` and `npm start` in this repo.
 You should be able to make calls like those listed below and see that GraphQL subscriptions with graphql-ws work correctly. 
-Once line 11 of the index.ts is commented out and line 12 is uncommented the subscriptions stop working. 
+Once line 11 of the index.ts is commented out and line 12 is uncommented the subscriptions stop working. This image shows the debugging call stack, right-most, where the exception happens, the onRequestParse is highlighted but does not get called. The `onEnveloped` function is called in the leftmost pane.
 <img width="1860" alt="subscriptionProblem" src="https://github.com/cramhead/private-public-graphql-subscriptions/assets/386035/220c706c-b152-4250-8e66-13a5b048451e">
 
 ## Some Sample Queries for the Playground
